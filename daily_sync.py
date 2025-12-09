@@ -8,7 +8,7 @@ import requests
 import psycopg2
 import sys
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote_plus, urlparse
 
 API_KEY = os.getenv("HIREBASE_API_KEY", "hb_2b5e7594-c13d-465b-8981-d7cdce7d1bbe")
@@ -182,8 +182,9 @@ def insert_job(cur, job, source_country):
 
 def fetch_and_import(country, max_jobs):
     """Fetch jobs from a country and import directly to DB"""
+    date_filter = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
     print(f"\n{'='*60}")
-    print(f"🌍 Fetching up to {max_jobs} jobs from {country}")
+    print(f"🌍 Fetching up to {max_jobs} jobs from {country} (posted after {date_filter})")
     print(f"{'='*60}")
 
     conn = get_db_connection()
@@ -199,6 +200,9 @@ def fetch_and_import(country, max_jobs):
         batch_size = min(100, max_jobs - total_fetched)
 
         try:
+            # Only fetch jobs from last 7 days
+            date_filter = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+
             response = requests.post(
                 API_URL,
                 headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
@@ -207,7 +211,8 @@ def fetch_and_import(country, max_jobs):
                     "country": country,
                     "limit": batch_size,
                     "offset": offset,
-                    "include_description": True
+                    "include_description": True,
+                    "date_posted_after": date_filter
                 },
                 timeout=30
             )
