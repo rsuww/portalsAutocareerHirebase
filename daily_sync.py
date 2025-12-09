@@ -201,7 +201,7 @@ def fetch_and_import(country, max_jobs):
         try:
             response = requests.post(
                 API_URL,
-                headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+                headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
                 json={
                     "query": "",
                     "country": country,
