@@ -236,9 +236,13 @@ def fetch_and_import(country, max_jobs):
                 # Commit after each job
                 conn.commit()
 
+                # Progress update every 10 jobs
+                if (inserted + updated + skipped) % 10 == 0:
+                    print(f"  → {inserted + updated + skipped} jobs processed (new: {inserted}, updated: {updated})", flush=True)
+
             total_fetched += len(jobs)
             offset += batch_size
-            print(f"  Progress: {total_fetched}/{max_jobs} (new: {inserted}, updated: {updated})")
+            print(f"  ✓ Batch complete: {total_fetched}/{max_jobs} total (new: {inserted}, updated: {updated})", flush=True)
 
         except Exception as e:
             print(f"  ❌ Error fetching batch: {e}")

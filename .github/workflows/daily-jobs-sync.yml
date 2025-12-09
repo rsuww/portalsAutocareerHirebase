@@ -28,8 +28,7 @@ jobs:
       - name: Run sync
         id: sync
         run: |
-          python daily_sync.py > sync_output.txt 2>&1
-          cat sync_output.txt
+          python -u daily_sync.py 2>&1 | tee sync_output.txt
 
           NEW_JOBS=$(grep "New jobs added:" sync_output.txt | grep -o '[0-9]*' || echo "0")
           UPDATED_JOBS=$(grep "Existing updated:" sync_output.txt | grep -o '[0-9]*' | tail -1 || echo "0")
