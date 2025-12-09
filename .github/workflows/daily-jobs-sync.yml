@@ -1,0 +1,64 @@
+name: Daily Jobs Sync
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 2 AM UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync-jobs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install requests psycopg2-binary
+
+      - name: Run sync
+        id: sync
+        run: |
+          python daily_sync.py > sync_output.txt 2>&1
+          cat sync_output.txt
+
+          NEW_JOBS=$(grep "New jobs added:" sync_output.txt | grep -o '[0-9]*' || echo "0")
+          UPDATED_JOBS=$(grep "Existing updated:" sync_output.txt | grep -o '[0-9]*' | tail -1 || echo "0")
+
+          echo "new_jobs=$NEW_JOBS" >> $GITHUB_OUTPUT
+          echo "updated_jobs=$UPDATED_JOBS" >> $GITHUB_OUTPUT
+
+          if [ "$NEW_JOBS" -eq 0 ] && [ "$UPDATED_JOBS" -eq 0 ]; then
+            exit 1
+          fi
+        env:
+          HIREBASE_API_KEY: ${{ secrets.HIREBASE_API_KEY }}
+          SUPABASE_PASSWORD: ${{ secrets.SUPABASE_PASSWORD }}
+
+      - name: Alert on failure
+        if: failure()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '⚠️ Job Sync Failed',
+              body: `**Date:** ${new Date().toISOString()}\n**Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\n❌ No jobs imported.\n\ncc: @${{ github.repository_owner }}`,
+              labels: ['alert']
+            })
+
+      - name: Success
+        if: success()
+        run: |
+          echo "✅ New: ${{ steps.sync.outputs.new_jobs }}"
+          echo "✅ Updated: ${{ steps.sync.outputs.updated_jobs }}"
