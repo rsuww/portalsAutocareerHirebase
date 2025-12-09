@@ -182,9 +182,9 @@ def insert_job(cur, job, source_country):
 
 def fetch_and_import(country, max_jobs):
     """Fetch jobs from a country and import directly to DB"""
-    date_filter = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+    today = datetime.now().strftime('%Y-%m-%d')
     print(f"\n{'='*60}")
-    print(f"🌍 Fetching up to {max_jobs} jobs from {country} (posted after {date_filter})")
+    print(f"🌍 Fetching up to {max_jobs} jobs from {country} (posted on {today})")
     print(f"{'='*60}")
 
     conn = get_db_connection()
@@ -200,19 +200,17 @@ def fetch_and_import(country, max_jobs):
         batch_size = min(100, max_jobs - total_fetched)
 
         try:
-            # Only fetch jobs from last 7 days
-            date_filter = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            # Fetch jobs posted today only
+            today = datetime.now().strftime('%Y-%m-%d')
 
             response = requests.post(
                 API_URL,
                 headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
                 json={
-                    "query": "",
-                    "country": country,
+                    "geo_locations": [{"country": country}],
                     "limit": batch_size,
-                    "offset": offset,
-                    "include_description": True,
-                    "date_posted_after": date_filter
+                    "page": (offset // batch_size) + 1,
+                    "date_posted": today
                 },
                 timeout=30
             )
