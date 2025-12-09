@@ -341,11 +341,23 @@ def main():
     print(f"{'='*60}")
     print(f"DEBUG: API_KEY = {API_KEY[:15]}...{API_KEY[-5:]}")
 
+    # HARD LIMIT: Never exceed 10K jobs/day to prevent overcharges
+    MAX_DAILY_JOBS = 10000
+
     # Get today's schedule
     schedule = get_daily_schedule()
     day_name = datetime.now().strftime('%A')
     print(f"\n📅 Today is {day_name}")
     print(f"📋 Scheduled countries:")
+
+    # Calculate total and enforce limit
+    total_planned = sum(count for _, count in schedule)
+    if total_planned > MAX_DAILY_JOBS:
+        print(f"\n⚠️  FATAL: Schedule exceeds daily limit!")
+        print(f"   Planned: {total_planned}, Max: {MAX_DAILY_JOBS}")
+        print(f"   ABORTING to prevent overcharges\n")
+        sys.exit(1)
+
     for country, count in schedule:
         print(f"   - {country}: {count} jobs")
 
@@ -355,6 +367,11 @@ def main():
 
     # Fetch and import jobs from each country
     for country, max_jobs in schedule:
+        # Safety check before each fetch
+        if total_api_calls + max_jobs > MAX_DAILY_JOBS:
+            print(f"\n⚠️  STOPPING: Would exceed {MAX_DAILY_JOBS} job limit")
+            break
+
         ins, upd, skip = fetch_and_import(country, max_jobs)
         total_inserted += ins
         total_updated += upd
