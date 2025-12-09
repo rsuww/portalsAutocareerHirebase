@@ -259,56 +259,19 @@ def fetch_and_import(country, max_jobs):
 
 def get_daily_schedule():
     """
-    Returns country schedule based on day of week.
+    Returns country schedule - same every day.
     Stays within 10K/day API limit.
-    Priority: US, India, MEA countries, Canada, UK
+    Priority: UAE 50%, USA 20%, Saudi 10%, UK 10%, Canada 10%
     """
-    day = datetime.now().weekday()  # 0=Monday, 6=Sunday
-
-    schedules = {
-        0: [  # Monday: US, India, UAE, Saudi
-            ("USA", 3000),
-            ("India", 2000),
-            ("United Arab Emirates", 2000),
-            ("Saudi Arabia", 1000),
-        ],
-        1: [  # Tuesday: US, India, Canada, UK
-            ("USA", 3000),
-            ("India", 2000),
-            ("Canada", 2000),
-            ("UK", 2000),
-        ],
-        2: [  # Wednesday: US, India, UAE, Egypt
-            ("USA", 3000),
-            ("India", 2000),
-            ("United Arab Emirates", 2000),
-            ("Egypt", 1000),
-        ],
-        3: [  # Thursday: US, India, Canada, UK
-            ("USA", 3000),
-            ("India", 2000),
-            ("Canada", 2000),
-            ("UK", 2000),
-        ],
-        4: [  # Friday: US, India, Saudi, Kuwait
-            ("USA", 3000),
-            ("India", 2000),
-            ("Saudi Arabia", 2000),
-            ("Kuwait", 1000),
-        ],
-        5: [  # Saturday: Light refresh - US, India, UAE
-            ("USA", 2000),
-            ("India", 2000),
-            ("United Arab Emirates", 2000),
-        ],
-        6: [  # Sunday: Light refresh - US, India, Canada
-            ("USA", 2000),
-            ("India", 2000),
-            ("Canada", 2000),
-        ],
-    }
-
-    return schedules.get(day, schedules[0])
+    # Same schedule every day
+    schedule = [
+        ("United Arab Emirates", 5000),  # 50%
+        ("USA", 2000),                    # 20%
+        ("Saudi Arabia", 1000),           # 10%
+        ("UK", 1000),                     # 10%
+        ("Canada", 1000),                 # 10%
+    ]
+    return schedule
 
 def cleanup_old_jobs(days_threshold=30):
     """Deactivate jobs older than threshold based on posted_date"""
