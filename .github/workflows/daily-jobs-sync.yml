@@ -2,7 +2,7 @@ name: Daily Jobs Sync
 
 on:
   schedule:
-    - cron: '0 2 * * *'  # 2 AM UTC daily
+    - cron: '0 19 * * *'  # 11 PM GST (7 PM UTC) daily
   workflow_dispatch:
 
 permissions:
