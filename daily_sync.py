@@ -185,7 +185,7 @@ def fetch_and_import(country, max_jobs):
     today = datetime.now().strftime('%Y-%m-%d')
     print(f"\n{'='*60}")
     print(f"🌍 Fetching up to {max_jobs} jobs from {country} (posted on {today})")
-    print(f"🏭 Industry filters: Construction, Corporate Services, Education, Media & Communications, Software & IT, Tech")
+    print(f"🏭 Industry filters: Construction, Corporate Services, Education, Media & Communications, Tech/Software/IT")
     print(f"{'='*60}")
 
     conn = get_db_connection()
@@ -212,7 +212,7 @@ def fetch_and_import(country, max_jobs):
                     "limit": batch_size,
                     "page": (offset // batch_size) + 1,
                     "date_posted": today,
-                    "industry": ["Construction", "Corporate Services", "Education", "Media & Communications", "Software & IT", "Tech"]
+                    "industry": ["Construction", "Corporate Services", "Education", "Media & Communications", "Tech, Software & IT Services"]
                 },
                 timeout=30
             )
