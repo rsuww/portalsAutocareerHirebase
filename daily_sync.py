@@ -263,15 +263,14 @@ def get_daily_schedule():
     """
     Returns country schedule - same every day.
     Stays within 10K/day API limit.
-    Priority: UAE 50%, USA 20%, Saudi 10%, UK 10%, Canada 10%
+    Priority: UAE 80%, USA 10%, Saudi 5%, UK 5%
     """
     # Same schedule every day
     schedule = [
-        ("United Arab Emirates", 5000),  # 50%
-        ("USA", 2000),                    # 20%
-        ("Saudi Arabia", 1000),           # 10%
-        ("UK", 1000),                     # 10%
-        ("Canada", 1000),                 # 10%
+        ("United Arab Emirates", 8000),  # 80%
+        ("USA", 1000),                    # 10%
+        ("Saudi Arabia", 500),            # 5%
+        ("UK", 500),                      # 5%
     ]
     return schedule
 
