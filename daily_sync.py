@@ -62,6 +62,52 @@ def check_daily_limit():
     remaining = MAX_DAILY_API_CALLS - used
     return max(0, remaining), used
 
+def get_last_sync_date(country):
+    """Get the last successful sync date for a country"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    # Create tracking table if not exists
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS hirebase_sync_tracker (
+            country VARCHAR(100) PRIMARY KEY,
+            last_sync_date DATE,
+            last_sync_time TIMESTAMP DEFAULT NOW(),
+            jobs_fetched INTEGER DEFAULT 0
+        )
+    """)
+    conn.commit()
+
+    cur.execute("SELECT last_sync_date FROM hirebase_sync_tracker WHERE country = %s", (country,))
+    result = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if result and result[0]:
+        return result[0].strftime('%Y-%m-%d')
+    else:
+        # First time syncing this country - get jobs from last 7 days
+        return (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+
+def update_sync_tracker(country, jobs_fetched):
+    """Update the last sync date for a country"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    cur.execute("""
+        INSERT INTO hirebase_sync_tracker (country, last_sync_date, last_sync_time, jobs_fetched)
+        VALUES (%s, %s, NOW(), %s)
+        ON CONFLICT (country) DO UPDATE SET
+            last_sync_date = %s,
+            last_sync_time = NOW(),
+            jobs_fetched = hirebase_sync_tracker.jobs_fetched + %s
+    """, (country, today, jobs_fetched, today, jobs_fetched))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
 def get_favicon_from_website(website):
     try:
         if not website:
@@ -205,12 +251,20 @@ def insert_job(cur, job, source_country):
         print(f"    Error: {e}")
         return 'error'
 
-def fetch_and_import(country, max_jobs):
-    """Fetch jobs from a country - only add NEW jobs, skip existing ones"""
+def fetch_and_import(country, max_jobs, is_weekly_refresh=False):
+    """Fetch jobs from a country - only jobs posted since last sync"""
+
+    # Get last sync date for this country
+    last_sync = get_last_sync_date(country)
+
     print(f"\n{'='*60}")
-    print(f"🌍 Fetching up to {max_jobs} API calls from {country}")
-    print(f"🏭 Industry filters: Construction, Corporate Services, Education, Media & Communications, Tech/Software/IT")
-    print(f"🔍 Mode: NEW JOBS ONLY (skipping existing, sorted by newest)")
+    print(f"🌍 Fetching jobs from {country}")
+    print(f"📅 Jobs posted after: {last_sync}")
+    print(f"🏭 Industries: Construction, Corporate Services, Education, Media & Communications, Tech/Software/IT")
+    if is_weekly_refresh:
+        print(f"🔄 Mode: WEEKLY REFRESH (full scan)")
+    else:
+        print(f"⚡ Mode: INCREMENTAL (only new jobs since last sync)")
     print(f"{'='*60}")
 
     conn = get_db_connection()
@@ -220,24 +274,28 @@ def fetch_and_import(country, max_jobs):
     inserted = 0
     existing = 0
     skipped = 0
-    consecutive_low_yield_pages = 0  # Track pages with few new jobs
+    consecutive_low_yield_pages = 0
 
     while api_calls < max_jobs:
         batch_size = min(100, max_jobs - api_calls)
         page = (api_calls // 100) + 1
 
         try:
+            # Build request with date filter
+            request_json = {
+                "geo_locations": [{"country": country}],
+                "limit": batch_size,
+                "page": page,
+                "sort": "date_posted",
+                "sort_order": "desc",
+                "industry": ["Construction", "Corporate Services", "Education", "Media & Communications", "Tech, Software & IT Services"],
+                "date_posted_after": last_sync  # Only jobs posted after last sync
+            }
+
             response = requests.post(
                 API_URL,
                 headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
-                json={
-                    "geo_locations": [{"country": country}],
-                    "limit": batch_size,
-                    "page": page,
-                    "sort": "date_posted",  # Sort by newest first
-                    "sort_order": "desc",   # Descending = newest first
-                    "industry": ["Construction", "Corporate Services", "Education", "Media & Communications", "Tech, Software & IT Services"]
-                },
+                json=request_json,
                 timeout=30
             )
 
@@ -247,9 +305,13 @@ def fetch_and_import(country, max_jobs):
 
             data = response.json()
             jobs = data.get('jobs', [])
+            total_available = data.get('total_count', 0)
+
+            if page == 1:
+                print(f"  📊 Total jobs available since {last_sync}: {total_available}")
 
             if not jobs:
-                print(f"  ℹ️  No more jobs available from API (page {page})")
+                print(f"  ✅ No more jobs available (fetched all {api_calls} jobs posted since {last_sync})")
                 break
 
             # Track new jobs this page
@@ -278,17 +340,16 @@ def fetch_and_import(country, max_jobs):
             new_rate = (page_inserted / total_this_page * 100) if total_this_page > 0 else 0
 
             # Progress update after each batch
-            print(f"  ✓ Page {page}: {api_calls} API calls, {inserted} new total, {page_inserted} new this page ({new_rate:.0f}% yield)", flush=True)
+            print(f"  ✓ Page {page}: {inserted} new (+{page_inserted}), {existing} existed, {new_rate:.0f}% yield", flush=True)
 
             # Early stopping: if 3 consecutive pages have <10% new jobs, stop
             if new_rate < 10:
                 consecutive_low_yield_pages += 1
                 if consecutive_low_yield_pages >= 3:
-                    print(f"  ⚡ EARLY STOP: {consecutive_low_yield_pages} consecutive pages with <10% new jobs")
-                    print(f"     Stopping to save API calls - most jobs already in DB")
+                    print(f"  ⚡ EARLY STOP: 3 pages with <10% new jobs - likely caught up")
                     break
             else:
-                consecutive_low_yield_pages = 0  # Reset counter
+                consecutive_low_yield_pages = 0
 
         except Exception as e:
             print(f"  ❌ Error fetching batch: {e}")
@@ -297,7 +358,17 @@ def fetch_and_import(country, max_jobs):
     cur.close()
     conn.close()
 
-    print(f"\n✅ {country} complete: {inserted} NEW jobs added, {existing} already existed, {skipped} skipped")
+    # Update sync tracker with today's date
+    if inserted > 0:
+        update_sync_tracker(country, inserted)
+
+    efficiency = (inserted / api_calls * 100) if api_calls > 0 else 0
+    print(f"\n✅ {country} complete:")
+    print(f"   New jobs added: {inserted}")
+    print(f"   Already in DB:  {existing}")
+    print(f"   API calls used: {api_calls}")
+    print(f"   Efficiency:     {efficiency:.0f}%")
+
     return inserted, existing, skipped
 
 def get_daily_schedule():
@@ -364,11 +435,21 @@ def main():
         print(f"   No API calls will be made. Try again tomorrow.\n")
         sys.exit(0)
 
+    # Check if it's a weekly refresh day (Sunday)
+    day_name = datetime.now().strftime('%A')
+    is_weekly_refresh = (day_name == "Sunday")
+
     # Get today's schedule
     schedule = get_daily_schedule()
-    day_name = datetime.now().strftime('%A')
     print(f"\n📅 Today is {day_name}")
-    print(f"📋 Scheduled countries:")
+    if is_weekly_refresh:
+        print(f"🔄 WEEKLY REFRESH MODE - doing deeper scan")
+
+    # Show last sync dates for each country
+    print(f"\n📋 Scheduled countries (with last sync dates):")
+    for country, max_calls in schedule:
+        last_sync = get_last_sync_date(country)
+        print(f"   - {country}: up to {max_calls} calls (last sync: {last_sync})")
 
     # Calculate total planned and adjust if needed
     total_planned = sum(count for _, count in schedule)
@@ -381,9 +462,6 @@ def main():
         schedule = [(country, int(count * scale_factor)) for country, count in schedule]
         total_planned = sum(count for _, count in schedule)
         print(f"   New total: {total_planned} API calls")
-
-    for country, count in schedule:
-        print(f"   - {country}: {count} API calls")
 
     total_inserted = 0
     total_existing = 0
@@ -403,7 +481,7 @@ def main():
             else:
                 break
 
-        ins, exist, skip = fetch_and_import(country, max_jobs)
+        ins, exist, skip = fetch_and_import(country, max_jobs, is_weekly_refresh)
         total_inserted += ins
         total_existing += exist
 
