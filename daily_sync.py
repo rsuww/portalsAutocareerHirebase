@@ -86,11 +86,18 @@ def format_seniority(yoe_range):
         return "Lead/Principal"
 
 def insert_job(cur, job, source_country):
-    """Insert or update a single job"""
+    """Insert new job only - skip if already exists"""
     try:
         external_url = job.get('application_link')
         if not external_url:
             return 'skipped'
+
+        # Check if job already exists - if so, skip it (don't update daily)
+        cur.execute("SELECT id FROM jobs WHERE external_job_url = %s", (external_url,))
+        existing = cur.fetchone()
+
+        if existing:
+            return 'exists'  # Skip existing jobs - we only want NEW jobs
 
         company_name = job.get('company_name') or 'Unknown'
         job_title = job.get('job_title') or 'Position Available'
@@ -124,94 +131,60 @@ def insert_job(cur, job, source_country):
         job_categories_list = job.get('job_categories', [])
         job_categories = ', '.join(job_categories_list) if job_categories_list else None
 
-        # Check if job exists by external_job_url
-        cur.execute("SELECT id FROM jobs WHERE external_job_url = %s", (external_url,))
-        existing = cur.fetchone()
-
-        if existing:
-            # Update existing job
-            cur.execute("""
-                UPDATE jobs SET
-                    title = %s, company = COALESCE(%s, company), location = %s,
-                    job_description = %s, company_website = %s, employment_type = %s,
-                    salary = %s, job_posting_time = %s, work_mode = %s, company_favicon = %s,
-                    seniority_level = %s, industry = %s, last_updated = %s, is_active = %s,
-                    country = %s, posted_date = %s, days_since_posted = %s, source = %s,
-                    company_linkedin = %s, company_size = %s, company_services = %s,
-                    language = %s, job_categories = %s
-                WHERE external_job_url = %s
-            """, (
-                job_title, company_name, location_str,
-                job.get('description', '')[:4000] if job.get('description') else None,
-                job.get('company_link'), job.get('job_type'),
-                format_salary(job.get('salary_range')), job.get('date_posted'),
-                job.get('location_type'),
-                job.get('company_logo') or get_favicon_from_website(job.get('company_link')),
-                format_seniority(job.get('yoe_range')), industry, datetime.now(), True,
-                country, posted_date, days_since, 'hirebase',
-                company_linkedin, company_size, company_services, language, job_categories,
-                external_url
-            ))
-            return 'updated'
-        else:
-            # Insert new job
-            company_favicon = job.get('company_logo') or get_favicon_from_website(job.get('company_link'))
-            cur.execute("""
-                INSERT INTO jobs (
-                    title, company, location, job_description, external_job_url,
-                    company_website, employment_type, salary, job_posting_time,
-                    work_mode, company_favicon, seniority_level, industry,
-                    created_at, last_updated, is_active, country, posted_date,
-                    days_since_posted, source, company_linkedin, company_size,
-                    company_services, language, job_categories
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (
-                job_title, company_name, location_str,
-                job.get('description', '')[:4000] if job.get('description') else None,
-                external_url, job.get('company_link'), job.get('job_type'),
-                format_salary(job.get('salary_range')), job.get('date_posted'),
-                job.get('location_type'), company_favicon,
-                format_seniority(job.get('yoe_range')), industry,
-                datetime.now(), datetime.now(), True, country, posted_date, days_since,
-                'hirebase', company_linkedin, company_size, company_services, language, job_categories
-            ))
-            return 'inserted'
+        # Insert new job
+        company_favicon = job.get('company_logo') or get_favicon_from_website(job.get('company_link'))
+        cur.execute("""
+            INSERT INTO jobs (
+                title, company, location, job_description, external_job_url,
+                company_website, employment_type, salary, job_posting_time,
+                work_mode, company_favicon, seniority_level, industry,
+                created_at, last_updated, is_active, country, posted_date,
+                days_since_posted, source, company_linkedin, company_size,
+                company_services, language, job_categories
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            job_title, company_name, location_str,
+            job.get('description', '')[:4000] if job.get('description') else None,
+            external_url, job.get('company_link'), job.get('job_type'),
+            format_salary(job.get('salary_range')), job.get('date_posted'),
+            job.get('location_type'), company_favicon,
+            format_seniority(job.get('yoe_range')), industry,
+            datetime.now(), datetime.now(), True, country, posted_date, days_since,
+            'hirebase', company_linkedin, company_size, company_services, language, job_categories
+        ))
+        return 'inserted'
     except Exception as e:
         print(f"    Error: {e}")
         return 'error'
 
 def fetch_and_import(country, max_jobs):
-    """Fetch jobs from a country and import directly to DB"""
-    today = datetime.now().strftime('%Y-%m-%d')
+    """Fetch jobs from a country - only add NEW jobs, skip existing ones"""
     print(f"\n{'='*60}")
-    print(f"🌍 Fetching up to {max_jobs} jobs from {country} (posted on {today})")
+    print(f"🌍 Fetching up to {max_jobs} API calls from {country}")
     print(f"🏭 Industry filters: Construction, Corporate Services, Education, Media & Communications, Tech/Software/IT")
+    print(f"🔍 Mode: NEW JOBS ONLY (skipping existing)")
     print(f"{'='*60}")
 
     conn = get_db_connection()
     cur = conn.cursor()
 
-    total_fetched = 0
+    api_calls = 0
     inserted = 0
-    updated = 0
+    existing = 0
     skipped = 0
-    offset = 0
 
-    while total_fetched < max_jobs:
-        batch_size = min(100, max_jobs - total_fetched)
+    while api_calls < max_jobs:
+        batch_size = min(100, max_jobs - api_calls)
+        page = (api_calls // 100) + 1
 
         try:
-            # Fetch jobs posted today only
-            today = datetime.now().strftime('%Y-%m-%d')
-
             response = requests.post(
                 API_URL,
                 headers={"x-api-key": API_KEY, "Content-Type": "application/json"},
                 json={
                     "geo_locations": [{"country": country}],
                     "limit": batch_size,
-                    "page": (offset // batch_size) + 1,
-                    "date_posted": today,
+                    "page": page,
                     "industry": ["Construction", "Corporate Services", "Education", "Media & Communications", "Tech, Software & IT Services"]
                 },
                 timeout=30
@@ -225,7 +198,7 @@ def fetch_and_import(country, max_jobs):
             jobs = data.get('jobs', [])
 
             if not jobs:
-                print(f"  ℹ️  No more jobs available (got {total_fetched} total)")
+                print(f"  ℹ️  No more jobs available from API (page {page})")
                 break
 
             # Process each job immediately
@@ -233,21 +206,18 @@ def fetch_and_import(country, max_jobs):
                 result = insert_job(cur, job, country)
                 if result == 'inserted':
                     inserted += 1
-                elif result == 'updated':
-                    updated += 1
+                elif result == 'exists':
+                    existing += 1
                 else:
                     skipped += 1
 
                 # Commit after each job
                 conn.commit()
 
-                # Progress update every 10 jobs
-                if (inserted + updated + skipped) % 10 == 0:
-                    print(f"  → {inserted + updated + skipped} jobs processed (new: {inserted}, updated: {updated})", flush=True)
+            api_calls += len(jobs)
 
-            total_fetched += len(jobs)
-            offset += batch_size
-            print(f"  ✓ Batch complete: {total_fetched}/{max_jobs} total (new: {inserted}, updated: {updated})", flush=True)
+            # Progress update after each batch
+            print(f"  ✓ Page {page}: {api_calls} API calls, {inserted} new jobs found, {existing} already in DB", flush=True)
 
         except Exception as e:
             print(f"  ❌ Error fetching batch: {e}")
@@ -256,8 +226,8 @@ def fetch_and_import(country, max_jobs):
     cur.close()
     conn.close()
 
-    print(f"\n✅ {country} complete: {inserted} new, {updated} updated, {skipped} skipped")
-    return inserted, updated, skipped
+    print(f"\n✅ {country} complete: {inserted} NEW jobs added, {existing} already existed, {skipped} skipped")
+    return inserted, existing, skipped
 
 def get_daily_schedule():
     """
@@ -330,22 +300,22 @@ def main():
         sys.exit(1)
 
     for country, count in schedule:
-        print(f"   - {country}: {count} jobs")
+        print(f"   - {country}: {count} API calls")
 
     total_inserted = 0
-    total_updated = 0
+    total_existing = 0
     total_api_calls = 0
 
     # Fetch and import jobs from each country
     for country, max_jobs in schedule:
         # Safety check before each fetch
         if total_api_calls + max_jobs > MAX_DAILY_JOBS:
-            print(f"\n⚠️  STOPPING: Would exceed {MAX_DAILY_JOBS} job limit")
+            print(f"\n⚠️  STOPPING: Would exceed {MAX_DAILY_JOBS} API call limit")
             break
 
-        ins, upd, skip = fetch_and_import(country, max_jobs)
+        ins, exist, skip = fetch_and_import(country, max_jobs)
         total_inserted += ins
-        total_updated += upd
+        total_existing += exist
         total_api_calls += max_jobs
 
     # Cleanup old jobs
@@ -355,7 +325,7 @@ def main():
     print(f"\n{'='*60}")
     print(f"🎉 Daily Sync Complete!")
     print(f"   New jobs added:     {total_inserted}")
-    print(f"   Existing updated:   {total_updated}")
+    print(f"   Already in DB:      {total_existing}")
     print(f"   API calls used:     ~{total_api_calls}/10000")
     print(f"{'='*60}\n")
 
