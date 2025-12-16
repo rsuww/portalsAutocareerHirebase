@@ -210,7 +210,7 @@ def fetch_and_import(country, max_jobs):
     print(f"\n{'='*60}")
     print(f"🌍 Fetching up to {max_jobs} API calls from {country}")
     print(f"🏭 Industry filters: Construction, Corporate Services, Education, Media & Communications, Tech/Software/IT")
-    print(f"🔍 Mode: NEW JOBS ONLY (skipping existing)")
+    print(f"🔍 Mode: NEW JOBS ONLY (skipping existing, sorted by newest)")
     print(f"{'='*60}")
 
     conn = get_db_connection()
@@ -220,6 +220,7 @@ def fetch_and_import(country, max_jobs):
     inserted = 0
     existing = 0
     skipped = 0
+    consecutive_low_yield_pages = 0  # Track pages with few new jobs
 
     while api_calls < max_jobs:
         batch_size = min(100, max_jobs - api_calls)
@@ -233,6 +234,8 @@ def fetch_and_import(country, max_jobs):
                     "geo_locations": [{"country": country}],
                     "limit": batch_size,
                     "page": page,
+                    "sort": "date_posted",  # Sort by newest first
+                    "sort_order": "desc",   # Descending = newest first
                     "industry": ["Construction", "Corporate Services", "Education", "Media & Communications", "Tech, Software & IT Services"]
                 },
                 timeout=30
@@ -249,13 +252,19 @@ def fetch_and_import(country, max_jobs):
                 print(f"  ℹ️  No more jobs available from API (page {page})")
                 break
 
+            # Track new jobs this page
+            page_inserted = 0
+            page_existing = 0
+
             # Process each job immediately
             for job in jobs:
                 result = insert_job(cur, job, country)
                 if result == 'inserted':
                     inserted += 1
+                    page_inserted += 1
                 elif result == 'exists':
                     existing += 1
+                    page_existing += 1
                 else:
                     skipped += 1
 
@@ -264,8 +273,22 @@ def fetch_and_import(country, max_jobs):
 
             api_calls += len(jobs)
 
+            # Calculate yield rate for this page
+            total_this_page = page_inserted + page_existing
+            new_rate = (page_inserted / total_this_page * 100) if total_this_page > 0 else 0
+
             # Progress update after each batch
-            print(f"  ✓ Page {page}: {api_calls} API calls, {inserted} new jobs found, {existing} already in DB", flush=True)
+            print(f"  ✓ Page {page}: {api_calls} API calls, {inserted} new total, {page_inserted} new this page ({new_rate:.0f}% yield)", flush=True)
+
+            # Early stopping: if 3 consecutive pages have <10% new jobs, stop
+            if new_rate < 10:
+                consecutive_low_yield_pages += 1
+                if consecutive_low_yield_pages >= 3:
+                    print(f"  ⚡ EARLY STOP: {consecutive_low_yield_pages} consecutive pages with <10% new jobs")
+                    print(f"     Stopping to save API calls - most jobs already in DB")
+                    break
+            else:
+                consecutive_low_yield_pages = 0  # Reset counter
 
         except Exception as e:
             print(f"  ❌ Error fetching batch: {e}")
