@@ -13,6 +13,54 @@ from urllib.parse import quote_plus, urlparse
 
 API_KEY = os.getenv("HIREBASE_API_KEY", "hb_2b5e7594-c13d-465b-8981-d7cdce7d1bbe")
 API_URL = "https://api.hirebase.org/v2/jobs/search"
+MAX_DAILY_API_CALLS = 10000
+
+def get_today_api_usage():
+    """Get today's API usage from database"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    # Create tracking table if not exists
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS hirebase_api_usage (
+            date DATE PRIMARY KEY,
+            api_calls INTEGER DEFAULT 0,
+            last_updated TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    conn.commit()
+
+    cur.execute("SELECT api_calls FROM hirebase_api_usage WHERE date = %s", (today,))
+    result = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    return result[0] if result else 0
+
+def update_api_usage(calls_made):
+    """Update today's API usage in database"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    cur.execute("""
+        INSERT INTO hirebase_api_usage (date, api_calls, last_updated)
+        VALUES (%s, %s, NOW())
+        ON CONFLICT (date) DO UPDATE SET
+            api_calls = hirebase_api_usage.api_calls + %s,
+            last_updated = NOW()
+    """, (today, calls_made, calls_made))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+def check_daily_limit():
+    """Check if we've hit our daily limit - returns remaining calls or 0 if at limit"""
+    used = get_today_api_usage()
+    remaining = MAX_DAILY_API_CALLS - used
+    return max(0, remaining), used
 
 def get_favicon_from_website(website):
     try:
@@ -282,8 +330,16 @@ def main():
     print(f"{'='*60}")
     print(f"DEBUG: API_KEY = {API_KEY[:15]}...{API_KEY[-5:]}")
 
-    # HARD LIMIT: Never exceed 10K jobs/day to prevent overcharges
-    MAX_DAILY_JOBS = 10000
+    # CHECK DAILY LIMIT FIRST - before doing anything
+    remaining_calls, used_today = check_daily_limit()
+    print(f"\n📊 API Usage Check:")
+    print(f"   Already used today: {used_today}/{MAX_DAILY_API_CALLS}")
+    print(f"   Remaining:          {remaining_calls}")
+
+    if remaining_calls == 0:
+        print(f"\n🛑 STOPPING: Daily API limit already reached ({used_today}/{MAX_DAILY_API_CALLS})")
+        print(f"   No API calls will be made. Try again tomorrow.\n")
+        sys.exit(0)
 
     # Get today's schedule
     schedule = get_daily_schedule()
@@ -291,13 +347,17 @@ def main():
     print(f"\n📅 Today is {day_name}")
     print(f"📋 Scheduled countries:")
 
-    # Calculate total and enforce limit
+    # Calculate total planned and adjust if needed
     total_planned = sum(count for _, count in schedule)
-    if total_planned > MAX_DAILY_JOBS:
-        print(f"\n⚠️  FATAL: Schedule exceeds daily limit!")
-        print(f"   Planned: {total_planned}, Max: {MAX_DAILY_JOBS}")
-        print(f"   ABORTING to prevent overcharges\n")
-        sys.exit(1)
+
+    # Adjust schedule if we don't have enough remaining calls
+    if total_planned > remaining_calls:
+        print(f"\n⚠️  Adjusting schedule: planned {total_planned} but only {remaining_calls} remaining")
+        # Scale down proportionally
+        scale_factor = remaining_calls / total_planned
+        schedule = [(country, int(count * scale_factor)) for country, count in schedule]
+        total_planned = sum(count for _, count in schedule)
+        print(f"   New total: {total_planned} API calls")
 
     for country, count in schedule:
         print(f"   - {country}: {count} API calls")
@@ -308,25 +368,39 @@ def main():
 
     # Fetch and import jobs from each country
     for country, max_jobs in schedule:
-        # Safety check before each fetch
-        if total_api_calls + max_jobs > MAX_DAILY_JOBS:
-            print(f"\n⚠️  STOPPING: Would exceed {MAX_DAILY_JOBS} API call limit")
-            break
+        if max_jobs == 0:
+            continue
+
+        # Safety check: verify we still have remaining calls
+        current_remaining, current_used = check_daily_limit()
+        if current_remaining < max_jobs:
+            print(f"\n⚠️  STOPPING: Only {current_remaining} API calls remaining, need {max_jobs}")
+            if current_remaining > 0:
+                max_jobs = current_remaining  # Use what's left
+            else:
+                break
 
         ins, exist, skip = fetch_and_import(country, max_jobs)
         total_inserted += ins
         total_existing += exist
-        total_api_calls += max_jobs
+
+        # Update API usage tracking in database
+        actual_calls = ins + exist + skip  # Actual jobs processed = API calls made
+        update_api_usage(actual_calls)
+        total_api_calls += actual_calls
 
     # Cleanup old jobs
     cleanup_old_jobs(days_threshold=30)
 
     # Final summary
+    final_remaining, final_used = check_daily_limit()
     print(f"\n{'='*60}")
     print(f"🎉 Daily Sync Complete!")
     print(f"   New jobs added:     {total_inserted}")
     print(f"   Already in DB:      {total_existing}")
-    print(f"   API calls used:     ~{total_api_calls}/10000")
+    print(f"   API calls this run: {total_api_calls}")
+    print(f"   Total used today:   {final_used}/{MAX_DAILY_API_CALLS}")
+    print(f"   Remaining today:    {final_remaining}")
     print(f"{'='*60}\n")
 
 if __name__ == "__main__":
