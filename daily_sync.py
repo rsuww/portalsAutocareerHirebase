@@ -180,18 +180,37 @@ def format_seniority(yoe_range):
         return "Lead/Principal"
 
 def insert_job(cur, job, source_country):
-    """Insert new job only - skip if already exists"""
+    """Insert new job or update existing with new date (mark as reposted)"""
     try:
         external_url = job.get('application_link')
         if not external_url:
             return 'skipped'
 
-        # Check if job already exists - if so, skip it (don't update daily)
-        cur.execute("SELECT id FROM jobs WHERE external_job_url = %s", (external_url,))
+        # Parse the new date from API
+        posted_date, days_since = parse_date_posted(job.get('date_posted'))
+
+        # Check if job already exists
+        cur.execute("SELECT id, posted_date FROM jobs WHERE external_job_url = %s", (external_url,))
         existing = cur.fetchone()
 
         if existing:
-            return 'exists'  # Skip existing jobs - we only want NEW jobs
+            existing_id = existing[0]
+            existing_date = existing[1]
+
+            # If API has a newer date, update the job and mark as reposted
+            if posted_date and existing_date and posted_date > existing_date:
+                cur.execute("""
+                    UPDATE jobs
+                    SET posted_date = %s,
+                        days_since_posted = %s,
+                        job_posting_time = %s,
+                        is_reposted = true,
+                        last_updated = NOW()
+                    WHERE id = %s
+                """, (posted_date, days_since, job.get('date_posted'), existing_id))
+                return 'reposted'
+            else:
+                return 'exists'  # Same or older date, skip
 
         company_name = job.get('company_name') or 'Unknown'
         job_title = job.get('job_title') or 'Position Available'
@@ -204,8 +223,6 @@ def insert_job(cur, job, source_country):
         else:
             location_str = source_country
             country = normalize_country(source_country)
-
-        posted_date, days_since = parse_date_posted(job.get('date_posted'))
 
         company_data = job.get('company_data', {}) or {}
         industries = company_data.get('industries', [])
@@ -252,10 +269,10 @@ def insert_job(cur, job, source_country):
         return 'error'
 
 def fetch_and_import(country, max_jobs, is_weekly_refresh=False):
-    """Fetch jobs from a country - only jobs posted since last sync"""
+    """Fetch jobs from a country - only jobs posted since yesterday"""
 
-    # Get last sync date for this country
-    last_sync = get_last_sync_date(country)
+    # Use yesterday's date to catch new jobs
+    last_sync = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
 
     print(f"\n{'='*60}")
     print(f"🌍 Fetching jobs from {country}")
@@ -272,9 +289,9 @@ def fetch_and_import(country, max_jobs, is_weekly_refresh=False):
 
     api_calls = 0
     inserted = 0
+    reposted = 0
     existing = 0
     skipped = 0
-    consecutive_low_yield_pages = 0
 
     while api_calls < max_jobs:
         batch_size = min(100, max_jobs - api_calls)
@@ -314,8 +331,9 @@ def fetch_and_import(country, max_jobs, is_weekly_refresh=False):
                 print(f"  ✅ No more jobs available (fetched all {api_calls} jobs posted since {last_sync})")
                 break
 
-            # Track new jobs this page
+            # Track jobs this page
             page_inserted = 0
+            page_reposted = 0
             page_existing = 0
 
             # Process each job immediately
@@ -324,6 +342,9 @@ def fetch_and_import(country, max_jobs, is_weekly_refresh=False):
                 if result == 'inserted':
                     inserted += 1
                     page_inserted += 1
+                elif result == 'reposted':
+                    reposted += 1
+                    page_reposted += 1
                 elif result == 'exists':
                     existing += 1
                     page_existing += 1
@@ -335,21 +356,8 @@ def fetch_and_import(country, max_jobs, is_weekly_refresh=False):
 
             api_calls += len(jobs)
 
-            # Calculate yield rate for this page
-            total_this_page = page_inserted + page_existing
-            new_rate = (page_inserted / total_this_page * 100) if total_this_page > 0 else 0
-
             # Progress update after each batch
-            print(f"  ✓ Page {page}: {inserted} new (+{page_inserted}), {existing} existed, {new_rate:.0f}% yield", flush=True)
-
-            # Early stopping: if 3 consecutive pages have <10% new jobs, stop
-            if new_rate < 10:
-                consecutive_low_yield_pages += 1
-                if consecutive_low_yield_pages >= 3:
-                    print(f"  ⚡ EARLY STOP: 3 pages with <10% new jobs - likely caught up")
-                    break
-            else:
-                consecutive_low_yield_pages = 0
+            print(f"  ✓ Page {page}: {page_inserted} new, {page_reposted} reposted, {page_existing} unchanged", flush=True)
 
         except Exception as e:
             print(f"  ❌ Error fetching batch: {e}")
@@ -360,16 +368,15 @@ def fetch_and_import(country, max_jobs, is_weekly_refresh=False):
 
     # Always update sync tracker with today's date (even if no new inserts)
     # This ensures we don't re-scan the same date range tomorrow
-    update_sync_tracker(country, inserted)
+    update_sync_tracker(country, inserted + reposted)
 
-    efficiency = (inserted / api_calls * 100) if api_calls > 0 else 0
     print(f"\n✅ {country} complete:")
-    print(f"   New jobs added: {inserted}")
-    print(f"   Already in DB:  {existing}")
-    print(f"   API calls used: {api_calls}")
-    print(f"   Efficiency:     {efficiency:.0f}%")
+    print(f"   New jobs added:  {inserted}")
+    print(f"   Reposted/updated:{reposted}")
+    print(f"   Unchanged:       {existing}")
+    print(f"   API calls used:  {api_calls}")
 
-    return inserted, existing, skipped
+    return inserted, reposted, existing, skipped
 
 def get_daily_schedule():
     """
@@ -403,36 +410,6 @@ def get_daily_schedule():
     ]
     return schedule
 
-def cleanup_old_jobs(days_threshold=30):
-    """Deactivate jobs older than threshold based on posted_date"""
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    print(f"\n{'='*60}")
-    print(f"🧹 Cleaning up jobs older than {days_threshold} days...")
-    print(f"{'='*60}")
-
-    from datetime import timedelta
-    cutoff_date = datetime.now() - timedelta(days=days_threshold)
-
-    cur.execute("""
-        UPDATE jobs
-        SET is_active = false, last_updated = NOW()
-        WHERE is_active = true
-        AND posted_date < %s
-    """, (cutoff_date,))
-
-    affected = cur.rowcount
-    conn.commit()
-
-    print(f"✅ Deactivated {affected} old jobs (posted before {cutoff_date.strftime('%Y-%m-%d')})")
-
-    cur.execute("SELECT COUNT(*) FROM jobs WHERE is_active = true")
-    active_count = cur.fetchone()[0]
-    print(f"📊 Total active jobs: {active_count}")
-
-    cur.close()
-    conn.close()
 
 def main():
     """Main sync process"""
@@ -470,6 +447,7 @@ def main():
     print(f"   ... and {len(schedule) - 8} more European countries")
 
     total_inserted = 0
+    total_reposted = 0
     total_existing = 0
     total_api_calls = 0
 
@@ -485,12 +463,13 @@ def main():
         print(f"\n💰 Remaining API budget: {current_remaining}")
 
         # Give this country all remaining calls (it will stop when it runs out of new jobs)
-        ins, exist, skip = fetch_and_import(country, current_remaining, is_weekly_refresh)
+        ins, repost, exist, skip = fetch_and_import(country, current_remaining, is_weekly_refresh)
         total_inserted += ins
+        total_reposted += repost
         total_existing += exist
 
         # Update API usage tracking in database
-        actual_calls = ins + exist + skip
+        actual_calls = ins + repost + exist + skip
         if actual_calls > 0:
             update_api_usage(actual_calls)
             total_api_calls += actual_calls
@@ -500,15 +479,13 @@ def main():
             print(f"  ℹ️  No new jobs in {country}, trying next country...")
             continue
 
-    # Cleanup old jobs
-    cleanup_old_jobs(days_threshold=30)
-
     # Final summary
     final_remaining, final_used = check_daily_limit()
     print(f"\n{'='*60}")
     print(f"🎉 Daily Sync Complete!")
     print(f"   New jobs added:     {total_inserted}")
-    print(f"   Already in DB:      {total_existing}")
+    print(f"   Reposted/updated:   {total_reposted}")
+    print(f"   Unchanged:          {total_existing}")
     print(f"   API calls this run: {total_api_calls}")
     print(f"   Total used today:   {final_used}/{MAX_DAILY_API_CALLS}")
     print(f"   Remaining today:    {final_remaining}")
