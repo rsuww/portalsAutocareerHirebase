@@ -358,9 +358,9 @@ def fetch_and_import(country, max_jobs, is_weekly_refresh=False):
     cur.close()
     conn.close()
 
-    # Update sync tracker with today's date
-    if inserted > 0:
-        update_sync_tracker(country, inserted)
+    # Always update sync tracker with today's date (even if no new inserts)
+    # This ensures we don't re-scan the same date range tomorrow
+    update_sync_tracker(country, inserted)
 
     efficiency = (inserted / api_calls * 100) if api_calls > 0 else 0
     print(f"\n✅ {country} complete:")
