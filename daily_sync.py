@@ -373,16 +373,33 @@ def fetch_and_import(country, max_jobs, is_weekly_refresh=False):
 
 def get_daily_schedule():
     """
-    Returns country schedule - same every day.
-    Stays within 10K/day API limit.
-    Priority: UAE 80%, USA 10%, Saudi 5%, UK 5%
+    Returns country schedule in priority order.
+    Each country gets up to 10K calls - but will stop early when it runs out of new jobs.
+    Leftover calls cascade to next country in priority.
     """
-    # Same schedule every day
+    # Priority order - each gets up to 10K (will use less if fewer new jobs available)
     schedule = [
-        ("United Arab Emirates", 8000),  # 80%
-        ("USA", 1000),                    # 10%
-        ("Saudi Arabia", 500),            # 5%
-        ("UK", 500),                      # 5%
+        # Top priority
+        ("United Arab Emirates", 10000),
+        ("Saudi Arabia", 10000),
+        # Secondary
+        ("USA", 10000),
+        ("India", 10000),
+        ("UK", 10000),
+        ("Canada", 10000),
+        ("Pakistan", 10000),
+        ("Australia", 10000),
+        # European countries
+        ("Germany", 10000),
+        ("France", 10000),
+        ("Netherlands", 10000),
+        ("Spain", 10000),
+        ("Italy", 10000),
+        ("Sweden", 10000),
+        ("Switzerland", 10000),
+        ("Ireland", 10000),
+        ("Poland", 10000),
+        ("Belgium", 10000),
     ]
     return schedule
 
@@ -445,50 +462,43 @@ def main():
     if is_weekly_refresh:
         print(f"🔄 WEEKLY REFRESH MODE - doing deeper scan")
 
-    # Show last sync dates for each country
-    print(f"\n📋 Scheduled countries (with last sync dates):")
-    for country, max_calls in schedule:
+    # Show countries in priority order
+    print(f"\n📋 Countries (in priority order):")
+    for i, (country, _) in enumerate(schedule[:8], 1):  # Show first 8
         last_sync = get_last_sync_date(country)
-        print(f"   - {country}: up to {max_calls} calls (last sync: {last_sync})")
-
-    # Calculate total planned and adjust if needed
-    total_planned = sum(count for _, count in schedule)
-
-    # Adjust schedule if we don't have enough remaining calls
-    if total_planned > remaining_calls:
-        print(f"\n⚠️  Adjusting schedule: planned {total_planned} but only {remaining_calls} remaining")
-        # Scale down proportionally
-        scale_factor = remaining_calls / total_planned
-        schedule = [(country, int(count * scale_factor)) for country, count in schedule]
-        total_planned = sum(count for _, count in schedule)
-        print(f"   New total: {total_planned} API calls")
+        print(f"   {i}. {country} (last sync: {last_sync})")
+    print(f"   ... and {len(schedule) - 8} more European countries")
 
     total_inserted = 0
     total_existing = 0
     total_api_calls = 0
 
-    # Fetch and import jobs from each country
-    for country, max_jobs in schedule:
-        if max_jobs == 0:
-            continue
-
-        # Safety check: verify we still have remaining calls
+    # Fetch from each country in priority order until we hit 10K limit
+    for country, _ in schedule:
+        # Check remaining calls before each country
         current_remaining, current_used = check_daily_limit()
-        if current_remaining < max_jobs:
-            print(f"\n⚠️  STOPPING: Only {current_remaining} API calls remaining, need {max_jobs}")
-            if current_remaining > 0:
-                max_jobs = current_remaining  # Use what's left
-            else:
-                break
 
-        ins, exist, skip = fetch_and_import(country, max_jobs, is_weekly_refresh)
+        if current_remaining <= 0:
+            print(f"\n🛑 Daily limit reached ({MAX_DAILY_API_CALLS} calls). Stopping.")
+            break
+
+        print(f"\n💰 Remaining API budget: {current_remaining}")
+
+        # Give this country all remaining calls (it will stop when it runs out of new jobs)
+        ins, exist, skip = fetch_and_import(country, current_remaining, is_weekly_refresh)
         total_inserted += ins
         total_existing += exist
 
         # Update API usage tracking in database
-        actual_calls = ins + exist + skip  # Actual jobs processed = API calls made
-        update_api_usage(actual_calls)
-        total_api_calls += actual_calls
+        actual_calls = ins + exist + skip
+        if actual_calls > 0:
+            update_api_usage(actual_calls)
+            total_api_calls += actual_calls
+
+        # If this country used 0 calls (no new jobs), continue to next
+        if actual_calls == 0:
+            print(f"  ℹ️  No new jobs in {country}, trying next country...")
+            continue
 
     # Cleanup old jobs
     cleanup_old_jobs(days_threshold=30)
